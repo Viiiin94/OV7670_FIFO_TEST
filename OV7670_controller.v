@@ -38,8 +38,8 @@ module OV7670_controller(
     reg [1:0] state;
     
     // Clock Divider for I2C (Target ~200kHz)
-    reg [8:0] clk_div;
-    wire i2c_tick = (clk_div == 2500); // 100MHz / 500 = 200kHz toggle
+    reg [15:0] clk_div;
+    wire i2c_tick = (clk_div == 500); // 100MHz / 500 = 200kHz toggle
     
     // Tri-state buffer control
     reg siod_out;
@@ -98,7 +98,7 @@ module OV7670_controller(
             clk_div <= 0;
         end else if (!config_done) begin
             // [수정된 부분] 타이머가 제대로 동작하도록 수정
-            if (clk_div < 2500) begin
+            if (clk_div < 500) begin
                 clk_div <= clk_div + 1;
             end else begin
                 clk_div <= 0; // Tick 발생 시에만 리셋
