@@ -39,7 +39,7 @@ module OV7670_controller(
     
     // Clock Divider for I2C (Target ~200kHz)
     reg [15:0] clk_div;
-    wire i2c_tick = (clk_div == 500); // 100MHz / 500 = 200kHz toggle
+    wire i2c_tick = (clk_div == 1000); // 이거 선언만 하고 직접 사용을 안하는데?
     
     // Tri-state buffer control
     reg siod_out;
@@ -62,7 +62,7 @@ module OV7670_controller(
     always @(*) begin
         case(rom_addr)
             // 기본 설정 및 포맷
-//            8'h00 : command = 16'h1280; // COM7: Reset
+//            8'h00 : command = 16'h1280; // COM7: Reset 여기 리셋을 한 번 주고 RGB로 넘어가야 하지 않을가?
             8'h00 : command = 16'h1204; // COM7: RGB
             8'h01 : command = 16'h1100; // CLKRC: Internal Clock
             8'h02 : command = 16'h0C00; // COM3
@@ -98,7 +98,7 @@ module OV7670_controller(
             clk_div <= 0;
         end else if (!config_done) begin
             // [수정된 부분] 타이머가 제대로 동작하도록 수정
-            if (clk_div < 500) begin
+            if (clk_div < 1000) begin
                 clk_div <= clk_div + 1;
             end else begin
                 clk_div <= 0; // Tick 발생 시에만 리셋
@@ -124,7 +124,7 @@ module OV7670_controller(
                         end else begin
                             // Clock High -> Data Stable
                             if (bit_count == 0 || bit_count == 9 || bit_count == 18 || bit_count == 27) begin
-                                // ACK bit (Ignore/Check)
+                                // ACK bit (Ignore/Check) 여기 부분도 ACK 비트를 안 읽는 것 같아
                                 siod_oe <= 0; // Release line for ACK
                             end else begin
                                 siod_oe <= 1;
@@ -168,6 +168,138 @@ module OV7670_controller(
     end
 endmodule
 
+module ov7670_sccb (
+    input  wire clk,        // 100 MHz
+    input  wire reset,
+    output reg  sioc,
+    inout  wire siod,
+    output reg  done
+);
+
+    // ======================================================
+    // Clock divider: 100MHz -> 100kHz (500 cycles toggle)
+    // ======================================================
+    reg [8:0] clk_div;
+    wire scl_tick = (clk_div == 499);
+
+    always @(posedge clk) begin
+        if (reset) clk_div <= 0;
+        else if (scl_tick) clk_div <= 0;
+        else clk_div <= clk_div + 1;
+    end
+
+    // ======================================================
+    // Open-drain SIOD
+    // ======================================================
+    reg siod_out;
+    reg siod_oe;
+    assign siod = siod_oe ? siod_out : 1'bz;
+    wire siod_in = siod;
+
+    // ======================================================
+    // ROM (최소 + 안정 세트)
+    // ======================================================
+    reg [7:0] rom_addr;
+    reg [15:0] rom_data;
+
+    always @(*) begin
+        case (rom_addr)
+            8'd0: rom_data = 16'h1280; // COM7 reset
+            8'd1: rom_data = 16'h1204; // RGB
+            8'd2: rom_data = 16'h4010; // RGB565
+            8'd3: rom_data = 16'hFFFF; // END
+            default: rom_data = 16'hFFFF;
+        endcase
+    end
+
+    // ======================================================
+    // FSM
+    // ======================================================
+    localparam IDLE  = 0,
+               START = 1,
+               SEND  = 2,
+               ACK   = 3,
+               STOP  = 4;
+
+    reg [2:0] state;
+    reg [7:0] shift;
+    reg [3:0] bit_cnt;
+    reg [1:0] byte_sel;
+
+    always @(posedge clk) begin
+        if (reset) begin
+            state    <= IDLE;
+            sioc     <= 1;
+            siod_out <= 1;
+            siod_oe  <= 1;
+            rom_addr <= 0;
+            done     <= 0;
+        end else if (scl_tick) begin
+            case (state)
+
+            IDLE: begin
+                if (rom_data != 16'hFFFF) begin
+                    state <= START;
+                    done  <= 0;
+                end else begin
+                    done <= 1;
+                end
+            end
+
+            START: begin
+                siod_out <= 0;
+                siod_oe  <= 1;
+                sioc     <= 1;
+                shift    <= 8'h42; // OV7670 write addr
+                bit_cnt  <= 7;
+                byte_sel <= 0;
+                state    <= SEND;
+            end
+
+            SEND: begin
+                sioc <= 0;
+                siod_out <= shift[bit_cnt];
+                sioc <= 1;
+                if (bit_cnt == 0) state <= ACK;
+                else bit_cnt <= bit_cnt - 1;
+            end
+
+            ACK: begin
+                sioc <= 0;
+                siod_oe <= 0; // release
+                sioc <= 1;
+                if (siod_in != 0) begin
+                    state <= IDLE; // ACK 실패 → 중단
+                end else begin
+                    siod_oe <= 1;
+                    if (byte_sel == 0) begin
+                        shift <= rom_data[15:8];
+                        bit_cnt <= 7;
+                        byte_sel <= 1;
+                        state <= SEND;
+                    end else if (byte_sel == 1) begin
+                        shift <= rom_data[7:0];
+                        bit_cnt <= 7;
+                        byte_sel <= 2;
+                        state <= SEND;
+                    end else begin
+                        state <= STOP;
+                    end
+                end
+            end
+
+            STOP: begin
+                sioc <= 1;
+                siod_out <= 0;
+                siod_out <= 1;
+                rom_addr <= rom_addr + 1;
+                state <= IDLE;
+            end
+
+            endcase
+        end
+    end
+endmodule
 
 
 

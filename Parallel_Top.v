@@ -30,12 +30,12 @@ module Parallel_Top(
     output wire sioc,           // I2C Clock
     inout  wire siod,           // I2C Data
     input  wire vsync,          // VSYNC (새 프레임 알림)
-    input  wire href,           // (FIFO 버전에서는 보통 안 쓰지만 연결해둠)
+    input  wire href,           // HREF (데이터 유효 구간)
     
-    output wire fifo_rclk,      // JA7: Read Clock (RCK) - FPGA가 쏘는 클럭
-    output reg  fifo_rrst,      // JA8: Read Reset (RRST) - FPGA가 쏘는 리셋
-    output wire fifo_oe,        // JA9: Output Enable (OE)
-    output wire cam_reset,      // JA10: Camera Hardware Reset
+    output wire fifo_rclk,      // (카메라용 클럭 - 사용 안 함)
+    output reg  fifo_rrst,      // (FIFO 읽기 리셋)
+    output wire fifo_oe,        // (Output Enable)
+    output wire cam_reset,      // (Camera Reset)
 
     // ==================================================
     // [Pmod JB] 데이터 입력 (Camera -> FPGA)
@@ -43,14 +43,14 @@ module Parallel_Top(
     input wire [7:0] d_in,
 
     // ==================================================
-    // [Pmod JC] 제어 신호 (안 쓰는 핀 정리 + RPi 통신)
+    // [Pmod JC] 제어 신호 (사용 안 함)
     // ==================================================
-    output wire fifo_wrst,      // Write Reset (보통 카메라 내부 처리)
-    output wire fifo_wr,        // Write Enable (보통 카메라 내부 처리)
-    output wire pwdn,           // Power Down
+    output wire fifo_wrst, 
+    output wire fifo_wr, 
+    output wire pwdn,
     
-    output reg valid,           // To RPi: "가져가!"
-    input  wire ack,            // From RPi: "받았어!"
+    output reg valid,           // 디버그용 LED
+    input  wire ack,            // (무시함 - Free Run 모드)
 
     // ==================================================
     // [Pmod JXADC] 데이터 출력 (FPGA -> RPi)
@@ -64,125 +64,61 @@ module Parallel_Top(
     // --------------------------------------------------
     // 1. 카메라 기본 신호 설정
     // --------------------------------------------------
-    assign pwdn = 0;          // 동작 모드
-    assign cam_reset = 1;     // 리셋 해제 (Active Low인 경우 확인 필요, 보통 1)
+    assign pwdn = 0;        // Power Down (0=On)
+    assign cam_reset = ~reset_p;   // Reset (1=Active)
+    assign fifo_oe = 0;     // Output Enable (Always On)
+    assign fifo_wrst = 0;   // Write Reset
+    assign fifo_wr = 0;     // Write Enable (카메라 내부 제어용)
+    assign fifo_rclk = 0;   // 사용 안 함
     
-    // OE (Output Enable): 0일 때 데이터 출력 (Active Low)
-    // 항상 켜두거나, 읽을 때만 켜야 합니다. 여기선 항상 켭니다.
-    assign fifo_oe = 0; 
+//    reg [1:0] clk_25_cnt;
+//    always @(posedge clk) clk_25_cnt <= clk_25_cnt + 1;
     
-    // 쓰기 관련 핀은 카메라가 알아서 하도록 둡니다 (또는 GND/VCC 처리)
-    assign fifo_wrst = 0; // or 1, 보드마다 다름. 보통 0이나 1로 고정해도 됨
-    assign fifo_wr = 0;   
+//    // JA7번 핀(XCLK)으로 클럭 전송
+//    assign fifo_rclk = clk_25_cnt[1];
 
     // --------------------------------------------------
-    // 2. I2C 컨트롤러 (사용자님 코드 그대로 사용)
+    // 2. I2C 컨트롤러 (카메라 설정)
     // --------------------------------------------------
     wire config_done;
     OV7670_controller u_ctrl (
         .clk(clk),
-        .resend(reset_p),
+        .reset(reset_p),
         .config_done(config_done),
         .sioc(sioc),
         .siod(siod)
     );
 
     // --------------------------------------------------
-    // 3. RCK (Read Clock) 생성
+    // 3. 데이터 샘플링 (Camera -> FIFO)
     // --------------------------------------------------
-    // FPGA가 카메라에게 쏘는 클럭입니다.
-    // 100MHz 시스템 클럭을 나눠서 RCK를 만듭니다.
-    // 너무 빠르면 신호가 뭉개지므로 적당히 12.5MHz 정도로 만듭니다.
-    reg [2:0] div_cnt;
-    always @(posedge clk) div_cnt <= div_cnt + 1;
-    
-    // JA7 핀으로 나가는 클럭 (Bit 2 = 100MHz / 8 = 12.5MHz)
-    assign fifo_rclk = div_cnt[2];
-
-    // 데이터 읽기 타이밍: RCK가 High가 되는 순간(또는 Low)
-    // 여기서는 Edge 검출을 위해 펄스를 만듭니다.
-    wire rck_rise = (div_cnt == 3'b011); // RCK 상승 에지 직전
-
-    // --------------------------------------------------
-    // 4. 데이터 읽기 FSM (Master Mode)
-    // --------------------------------------------------
-    // 순서: VSYNC 대기 -> RRST 리셋 -> RCK 쏘면서 데이터 읽기
-    
-    reg [2:0] read_state = 0;
-    reg [18:0] pixel_cnt; // 38400 bytes (QQVGA)
-    
+    // PCLK 대신 시스템 클럭으로 HREF 구간만 캡처합니다.
+    // (간이 방식이지만 배선 복잡도를 줄여줍니다)
     reg [7:0] d_latch;
-    reg wr_en; // 내부 FIFO에 쓸 신호
+    reg wr_en;
 
     always @(posedge clk) begin
-        if (reset_p) begin
-            read_state <= 0;
-            fifo_rrst <= 1; // RRST는 평소에 High (Active Low Reset)
-            wr_en <= 0;
-            pixel_cnt <= 0;
+        if (href) begin
+            d_latch <= d_in;
+            wr_en <= 1; // HREF가 1일 때만 저장
         end else begin
-            case (read_state)
-                // [0] VSYNC 대기
-                0: begin
-                    wr_en <= 0;
-                    fifo_rrst <= 1;
-                    pixel_cnt <= 0;
-                    
-                    // VSYNC가 High였다가 Low로 떨어지면(캡처 완료) 시작
-                    // 간단히 VSYNC가 1일 때 다음 단계 준비
-                    if (vsync == 1) read_state <= 1;
-                end
-
-                // [1] 읽기 포인터 리셋 (RRST Pulse)
-                1: begin
-                    if (vsync == 0) begin // 프레임 캡처 끝남
-                        fifo_rrst <= 0; // Reset Active (Low)
-                        read_state <= 2;
-                    end
-                end
-
-                // [2] 리셋 해제
-                2: begin
-                    fifo_rrst <= 1; // Reset Inactive (High)
-                    // 리셋 후 약간의 딜레이가 필요할 수 있음
-                    read_state <= 3;
-                end
-
-                // [3] 데이터 읽어오기
-                3: begin
-                    // 우리가 만든 RCK 타이밍에 맞춰 데이터 캡처
-                    if (rck_rise) begin
-                        d_latch <= d_in; // JB포트에서 데이터 읽기
-                        wr_en <= 1;      // 내부 FIFO에 저장
-                        pixel_cnt <= pixel_cnt + 1;
-                    end else begin
-                        wr_en <= 0;
-                    end
-
-                    // QQVGA (160x120) * 2 byte = 38,400 bytes
-                    // 조금 넉넉하게 읽고 종료
-                    if (pixel_cnt >= 38400) begin
-                        read_state <= 0; // 다시 VSYNC 대기
-                    end
-                end
-            endcase
+            wr_en <= 0;
         end
     end
 
     // --------------------------------------------------
-    // 5. FPGA 내부 버퍼 (FIFO)
+    // 4. FIFO 인스턴스 (데이터 창고)
     // --------------------------------------------------
     wire [7:0] fifo_dout;
     wire fifo_full, fifo_empty;
     reg rd_en;
 
-    // 이제 쓰기 클럭도 시스템 클럭(clk)입니다!
     ov7670_fifo u_fifo (
-        .wr_clk(clk),     // [중요] 시스템 클럭 사용
+        .wr_clk(clk),      
         .din(d_latch),
         .wr_en(wr_en),
         
-        .rd_clk(clk),     // 읽기도 시스템 클럭
+        .rd_clk(clk),      
         .rd_en(rd_en),
         .dout(fifo_dout),
         
@@ -192,61 +128,169 @@ module Parallel_Top(
     );
 
     // --------------------------------------------------
-    // 6. 라즈베리 파이 전송 (Handshake)
+    // 5. 고속 전송 로직 (FPGA -> RPi)
     // --------------------------------------------------
-    localparam S_TX_IDLE = 0;
-    localparam S_TX_FETCH = 1;
-    localparam S_TX_VALID = 2;
-    localparam S_TX_ACK   = 3;
+    // Ack를 기다리지 않고 약 12.5MHz 속도로 계속 내보냅니다.
+    
+    reg [2:0] tx_div;
+    always @(posedge clk) tx_div <= tx_div + 1;
+    wire tx_clk = tx_div[2]; // 100MHz / 8 = 12.5MHz
 
-    reg [2:0] tx_state = S_TX_IDLE;
-
-    always @(posedge clk) begin
+    always @(posedge tx_clk) begin
         if (reset_p) begin
-            valid <= 0;
             rd_en <= 0;
-            tx_state <= S_TX_IDLE;
+            valid <= 0;
+            d_out <= 0;
+            fifo_rrst <= 1;
         end else begin
-            case(tx_state)
-                S_TX_IDLE: begin
-                    valid <= 0;
-                    rd_en <= 0;
-                    // FIFO에 데이터가 있고 설정이 끝났으면
-                    if (!fifo_empty) begin
-                        tx_state <= S_TX_FETCH;
-                    end
-                end
+            // VSYNC(새 프레임)가 들어오면 FIFO 읽기 포인터를 리셋해서
+            // 라즈베리 파이가 데이터를 놓쳐도 다음 프레임은 맞게 나오도록 함
+            if (vsync) fifo_rrst <= 0; // Reset Active
+            else       fifo_rrst <= 1; // Reset Release
 
-                S_TX_FETCH: begin
-                    rd_en <= 1; // FIFO에서 1바이트 꺼냄
-                    tx_state <= S_TX_VALID;
-                end
-
-                S_TX_VALID: begin
-                    rd_en <= 0;
-                    d_out <= fifo_dout;
-                    valid <= 1; // "가져가!"
-                    tx_state <= S_TX_ACK;
-                end
-
-                S_TX_ACK: begin
-                    // 라즈베리 파이가 받았다고 할 때까지 대기
-                    if (ack == 1) begin
-                        valid <= 0;
-                        tx_state <= S_TX_IDLE; // 다음 데이터 준비
-                    end
-                end
-            endcase
+            // 데이터가 있으면 무조건 보낸다!
+            if (!fifo_empty) begin
+                rd_en <= 1;
+                d_out <= fifo_dout;
+                valid <= 1; // LED 깜빡임용
+            end else begin
+                rd_en <= 0;
+                valid <= 0;
+                // d_out은 이전 값 유지 (SMI가 읽어가도록)
+            end
         end
     end
 
     // --------------------------------------------------
-    // 7. Debug LEDs
+    // 6. LED 상태 표시
     // --------------------------------------------------
-    assign led[0] = config_done; // 켜지면 I2C 설정 완료
-    assign led[1] = !fifo_empty; // 데이터가 들어오고 있음
-    assign led[2] = valid;       // 데이터 전송 중
-    assign led[3] = vsync;       // 카메라가 찍고 있음 (깜빡임)
-    assign led[15:8] = d_out;    // 데이터 값 모니터링
+    assign led[0] = config_done; // 켜져야 함 (I2C 완료)
+    assign led[1] = !fifo_empty; // 켜져야 함 (카메라 데이터 들어옴)
+    assign led[2] = vsync;       // 깜빡여야 함 (프레임 갱신)
+    assign led[15:8] = d_out;    // 빠르게 변해야 함 (데이터 출력)
 
 endmodule
+
+module OV7670_TOP_MODULE (
+    input  wire        clk,         // 100MHz
+    input  wire        reset_p,
+
+    // ===============================
+    // OV7670 SCCB
+    // ===============================
+    output wire        sioc,
+    inout  wire        siod,
+
+    // ===============================
+    // OV7670 Video Sync
+    // ===============================
+    input  wire        vsync,
+    input  wire        href,        // 디버그용
+
+    // ===============================
+    // FIFO Read Side (AL422B)
+    // ===============================
+    output wire        rclk,
+    output wire        rrst,
+    output wire        oe,
+    input  wire [7:0]  d_in,
+
+    // ===============================
+    // FIFO Write Side
+    // ===============================
+    output wire        wr,
+    output wire        wrst,
+
+    // ===============================
+    // Camera Control
+    // ===============================
+    output wire        rst,
+    output wire        pwdn,
+
+    // ===============================
+    // Raspberry Pi Interface
+    // ===============================
+    output wire [7:0]  d_out,
+    output wire        valid,
+    input  wire        ack,
+    
+    output wire [15:0] led
+);
+
+    assign rst  = 1'b1;
+    assign pwdn = 1'b0;
+
+    wire cam_ready;
+    wire [2:0] reader_state;  // Reader FSM 상태
+    wire [17:0] byte_cnt;     // Reader 바이트 카운터
+    
+    // ========================================
+    // LED 디버그 할당
+    // ========================================
+    assign led[0]  = cam_ready;      // SCCB 설정 완료
+    assign led[1]  = vsync;          // VSYNC 신호
+    assign led[2]  = href;           // HREF 신호
+    assign led[3]  = wr;             // FIFO Write
+    assign led[4]  = wrst;           // FIFO Write Reset
+    assign led[5]  = valid;          // RPi Valid 신호
+    assign led[6]  = ack;            // RPi ACK 신호
+    assign led[7]  = oe;             // FIFO Output Enable
+    
+    // Reader FSM 상태 (3비트)
+    assign led[10:8] = reader_state;
+    
+    // 바이트 카운터 상위 5비트 (진행 상황)
+    assign led[15:11] = byte_cnt[17:13];
+
+    ov7670_sccb_ctrl u_sccb (
+        .clk       (clk),
+        .reset_p   (reset_p),
+        .sioc      (sioc),
+        .siod      (siod),
+        .cam_ready (cam_ready)
+    );
+    
+    ov7670_capture u_capture (
+        .clk        (clk),       // FIFO write clock = pclk
+        .vsync      (vsync),
+        .href       (href),
+        .cam_ready  (cam_ready),
+        .reset_p    (reset_p),
+    
+        .wr         (wr),
+        .wrst       (wrst),
+    
+        .yuv_phase  (),           // 디버그용, 미사용
+        .frame_done (),
+        .byte_count ()
+    );
+    
+    top_ov7670_rpi u_rpi (
+        .clk     (clk),
+        .reset_p (reset_p),
+    
+        .rclk    (rclk),
+        .rrst    (rrst),
+        .oe      (oe),
+        .d_in    (d_in),
+    
+        .d_out   (d_out),
+        .valid   (valid),
+        .ack     (ack),
+        
+        // 디버그 출력
+        .state_out (reader_state),   // ← 추가!
+        .byte_cnt_out (byte_cnt)     // ← 추가!
+    );
+
+endmodule
+
+
+
+
+
+
+
+
+
+
