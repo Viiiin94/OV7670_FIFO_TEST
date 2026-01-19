@@ -167,7 +167,7 @@ module Parallel_Top(
     assign led[0] = config_done; // 켜져야 함 (I2C 완료)
     assign led[1] = !fifo_empty; // 켜져야 함 (카메라 데이터 들어옴)
     assign led[2] = vsync;       // 깜빡여야 함 (프레임 갱신)
-    assign led[15:8] = d_out;    // 빠르게 변해야 함 (데이터 출력)
+    assign led[15:8] = d_in;    // 빠르게 변해야 함 (데이터 출력)
 
 endmodule
 
@@ -235,6 +235,7 @@ module OV7670_TOP_MODULE (
     assign led[5]  = valid;          // RPi Valid 신호
     assign led[6]  = ack;            // RPi ACK 신호
     assign led[7]  = oe;             // FIFO Output Enable
+//    assign led[15:8] = d_out[7:0];
     
     // Reader FSM 상태 (3비트)
     assign led[10:8] = reader_state;

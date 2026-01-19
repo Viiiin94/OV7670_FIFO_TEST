@@ -20,8 +20,161 @@
 //////////////////////////////////////////////////////////////////////////////////
 
 
+//module top_ov7670_rpi (
+//    input  wire        clk,        // 100MHz
+//    input  wire        reset_p,
+
+//    // ---- AL422B Read Side ----
+//    output wire        rclk,       // FIFO Read Clock
+//    output reg         rrst,       // FIFO Read Reset (Active Low)
+//    output reg         oe,         // FIFO Output Enable (Active Low)
+//    input  wire [7:0]  d_in,       // FIFO Data
+
+//    // ---- RPi Handshake ----
+//    output reg  [7:0]  d_out,
+//    output reg         valid,
+//    input  wire        ack,
+    
+//    // ==========================================
+//    // 디버그 출력 추가
+//    // ==========================================
+//    output wire [2:0]  state_out,    // FSM 상태
+//    output wire [17:0] byte_cnt_out  // 바이트 카운터
+//);
+
+//    // ------------------------------------------------------------
+//    // Parameters
+//    // ------------------------------------------------------------
+//    localparam FRAME_BYTES = 320 * 240 * 2; // QVGA YUV422
+
+//    // ------------------------------------------------------------
+//    // ACK synchronizer (VERY IMPORTANT)
+//    // ------------------------------------------------------------
+//    reg ack_ff1, ack_ff2;
+//    always @(posedge clk) begin
+//        ack_ff1 <= ack;
+//        ack_ff2 <= ack_ff1;
+//    end
+    
+//    reg rclk_reg;
+//    assign rclk = rclk_reg;
+    
+//    reg [7:0] d_in_stable;
+//    always @(negedge rclk) begin
+//        d_in_stable <= d_in;
+//    end
+    
+//    reg [7:0] d_in_sync1, d_in_sync2;
+//    always @(posedge clk) begin
+//        d_in_sync1 <= d_in_stable;
+//        d_in_sync2 <= d_in_sync1;  // 2-stage synchronizer
+//    end
+    
+//    // ------------------------------------------------------------
+//    // FSM
+//    // ------------------------------------------------------------
+//    localparam S_IDLE       = 0;
+//    localparam S_RRST       = 1;
+//    localparam S_WAIT_ACK   = 2;
+//    localparam S_DATA       = 3;
+//    localparam S_READ_NEXT  = 4;
+    
+//    reg [3:0] state;
+//    reg [17:0] byte_cnt;
+//    reg [2:0] wait_cnt;
+    
+//    // ==========================================
+//    // 디버그 출력 할당
+//    // ==========================================
+//    assign state_out = state;
+//    assign byte_cnt_out = byte_cnt;
+    
+//    // ------------------------------------------------------------
+//    // FSM logic (rclk domain이 아니라 clk domain!)
+//    // ------------------------------------------------------------
+//    always @(posedge clk or posedge reset_p) begin
+//        if (reset_p) begin
+//            state    <= S_IDLE;
+//            rrst     <= 1'b1;
+//            oe       <= 1'b1;
+//            valid    <= 1'b0;
+//            d_out    <= 8'd0;
+//            rclk_reg <= 1'b1;
+//            byte_cnt <= 0;
+//            wait_cnt <= 0;
+//        end else begin
+//            case (state)
+
+//                // --------------------------------------------
+//                // IDLE
+//                // --------------------------------------------
+//                S_IDLE: begin
+//                    rrst     <= 1'b0;   // reset read pointer
+//                    oe       <= 1'b1;
+//                    valid    <= 1'b0;
+//                    byte_cnt <= 0;
+//                    state    <= S_RRST;
+//                end
+
+//                // --------------------------------------------
+//                // RRST release
+//                // --------------------------------------------
+//                S_RRST: begin
+//                    rrst  <= 1'b1;
+//                    oe    <= 1'b0;      // enable FIFO output
+//                    state <= S_WAIT_ACK;
+//                end
+
+//                // --------------------------------------------
+//                // Wait RPi ready
+//                // --------------------------------------------
+//                S_WAIT_ACK: begin
+//                    rclk_reg <= 1'b1;
+//                    if (ack_ff2) begin
+//                        d_out <= d_in_sync2;  // DATA 먼저 고정
+//                        valid <= 1'b1;
+//                        state <= S_DATA;
+//                    end
+//                end
+
+//                // --------------------------------------------
+//                // DATA phase (VALID 유지)
+//                // --------------------------------------------
+//                S_DATA: begin
+//                    if (!ack_ff2) begin  // ACK 떨어짐 = RPi가 받았음
+//                        valid <= 1'b0;
+//                        wait_cnt <= 0;
+//                        state <= S_READ_NEXT;  // 새 상태 추가
+//                    end
+//                end
+                
+//                S_READ_NEXT: begin
+//                    wait_cnt <= wait_cnt + 1;
+                
+//                    if (wait_cnt >= 4) begin
+//                        byte_cnt <= byte_cnt + 1;
+                        
+//                        if (byte_cnt >= FRAME_BYTES - 1) begin
+//                            // 프레임 완료!
+//                            oe <= 1'b1;      // FIFO 출력 비활성화
+//                            valid <= 1'b0;
+//                            state <= S_IDLE;
+//                        end else begin
+//                            // 다음 바이트
+//                            d_out <= d_in_sync2;
+//                            valid <= 1'b1;
+//                            state <= S_DATA;
+//                        end
+//                    end 
+//                end
+//            endcase
+//        end
+//    end
+//endmodule
+
+
 module top_ov7670_rpi (
-    input  wire        clk,        // 100MHz
+    input  wire        clk,        // 100MHz System Clock
     input  wire        reset_p,
 
     // ---- AL422B Read Side ----
@@ -36,7 +189,7 @@ module top_ov7670_rpi (
     input  wire        ack,
     
     // ==========================================
-    // 디버그 출력 추가
+    // 디버그 출력
     // ==========================================
     output wire [2:0]  state_out,    // FSM 상태
     output wire [17:0] byte_cnt_out  // 바이트 카운터
@@ -48,7 +201,7 @@ module top_ov7670_rpi (
     localparam FRAME_BYTES = 320 * 240 * 2; // QVGA YUV422
 
     // ------------------------------------------------------------
-    // ACK synchronizer (VERY IMPORTANT)
+    // ACK synchronizer (CDC)
     // ------------------------------------------------------------
     reg ack_ff1, ack_ff2;
     always @(posedge clk) begin
@@ -57,48 +210,32 @@ module top_ov7670_rpi (
     end
     
     // ------------------------------------------------------------
-    // Read clock generator (10MHz)
+    // RCLK Control
     // ------------------------------------------------------------
-    reg [3:0] rclk_div;
-    
-    always @(posedge clk) begin
-        rclk_div <= rclk_div + 1;
-    end
-    
-    assign rclk = rclk_div[3];   // ~6.25MHz (충분히 안정)
-    
-    reg [7:0] d_in_stable;
-    always @(negedge rclk) begin
-        d_in_stable <= d_in;
-    end
-    
-    reg [7:0] d_in_sync1, d_in_sync2;
-    always @(posedge clk) begin
-        d_in_sync1 <= d_in_stable;
-        d_in_sync2 <= d_in_sync1;  // 2-stage synchronizer
-    end
+    reg rclk_reg;
+    assign rclk = rclk_reg;
     
     // ------------------------------------------------------------
-    // FSM
+    // FSM States
     // ------------------------------------------------------------
-    localparam S_IDLE       = 0;
-    localparam S_RRST       = 1;
-    localparam S_WAIT_ACK   = 2;
-    localparam S_DATA       = 3;
-    localparam S_READ_NEXT  = 4;
-    
-    reg [3:0] state;
+    localparam S_IDLE       = 3'd0;
+    localparam S_RRST       = 3'd1;
+    localparam S_WAIT_ACK   = 3'd2;
+    localparam S_FETCH_LO   = 3'd3; // RCLK Low (준비)
+    localparam S_FETCH_HI   = 3'd4; // RCLK High (데이터 출력)
+    localparam S_LATCH      = 3'd5; // 데이터 안정화 대기 및 래치
+    localparam S_HANDSHAKE  = 3'd6; // RPi 수신 확인 대기 (ACK Low)
+
+    reg [2:0] state;
     reg [17:0] byte_cnt;
-    reg [2:0] wait_cnt;
+    reg [3:0] wait_cnt; // 데이터 엑세스 타임 확보용 카운터
     
-    // ==========================================
     // 디버그 출력 할당
-    // ==========================================
     assign state_out = state;
     assign byte_cnt_out = byte_cnt;
     
     // ------------------------------------------------------------
-    // FSM logic (rclk domain이 아니라 clk domain!)
+    // Main FSM Logic
     // ------------------------------------------------------------
     always @(posedge clk or posedge reset_p) begin
         if (reset_p) begin
@@ -107,72 +244,86 @@ module top_ov7670_rpi (
             oe       <= 1'b1;
             valid    <= 1'b0;
             d_out    <= 8'd0;
+            rclk_reg <= 1'b1; // Default High
             byte_cnt <= 0;
             wait_cnt <= 0;
         end else begin
             case (state)
-
                 // --------------------------------------------
-                // IDLE
+                // 1. 초기화 및 리셋
                 // --------------------------------------------
                 S_IDLE: begin
-                    rrst     <= 1'b0;   // reset read pointer
-                    oe       <= 1'b1;
+                    rrst     <= 1'b0; // Reset Active (Low)
+                    oe       <= 1'b1; // Output Disable
                     valid    <= 1'b0;
                     byte_cnt <= 0;
+                    rclk_reg <= 1'b1;
                     state    <= S_RRST;
                 end
 
-                // --------------------------------------------
-                // RRST release
-                // --------------------------------------------
                 S_RRST: begin
-                    rrst  <= 1'b1;
-                    oe    <= 1'b0;      // enable FIFO output
-                    state <= S_WAIT_ACK;
+                    rrst     <= 1'b1; // Reset Release
+                    oe       <= 1'b0; // Output Enable (데이터 버스 연결)
+                    state    <= S_WAIT_ACK;
                 end
 
                 // --------------------------------------------
-                // Wait RPi ready
+                // 2. 라즈베리 파이 요청 대기 (ACK High?)
                 // --------------------------------------------
                 S_WAIT_ACK: begin
-                    if (ack_ff2) begin
-                        d_out <= d_in_sync2;  // DATA 먼저 고정
-                        valid <= 1'b1;
-                        state <= S_DATA;
+                    rclk_reg <= 1'b1;
+                    if (ack_ff2) begin // ACK가 1이 되면
+                        state <= S_FETCH_LO;
                     end
                 end
 
                 // --------------------------------------------
-                // DATA phase (VALID 유지)
+                // 3. FIFO에서 데이터 1바이트 꺼내기 (Clock Toggle)
                 // --------------------------------------------
-                S_DATA: begin
-                    if (!ack_ff2) begin  // ACK 떨어짐 = RPi가 받았음
+                S_FETCH_LO: begin
+                    rclk_reg <= 1'b0; // RCLK Low
+                    state    <= S_FETCH_HI;
+                end
+
+                S_FETCH_HI: begin
+                    rclk_reg <= 1'b1; // RCLK High (Rising Edge에 데이터 바뀜)
+                    wait_cnt <= 0;
+                    state    <= S_LATCH;
+                end
+
+                // --------------------------------------------
+                // 4. 데이터 안정화 대기 및 저장
+                // --------------------------------------------
+                S_LATCH: begin
+                    // AL422B Access Time(약 20~30ns) 확보
+                    // 100MHz 클럭 기준 4사이클(40ns) 대기하면 안전
+                    if (wait_cnt >= 4) begin
+                        d_out <= d_in; // 데이터 래치 (FPGA 내부로 저장)
+                        valid <= 1'b1; // "가져가세요" 신호
+                        state <= S_HANDSHAKE;
+                    end else begin
+                        wait_cnt <= wait_cnt + 1;
+                    end
+                end
+
+                // --------------------------------------------
+                // 5. 라즈베리 파이 수신 완료 대기 (ACK Low?)
+                // --------------------------------------------
+                S_HANDSHAKE: begin
+                    if (!ack_ff2) begin // ACK가 0으로 떨어지면 (수신 완료)
                         valid <= 1'b0;
-                        wait_cnt <= 0;
-                        state <= S_READ_NEXT;  // 새 상태 추가
+                        
+                        // 프레임 끝인지 확인
+                        if (byte_cnt >= FRAME_BYTES - 1) begin
+                            state <= S_IDLE; // 다음 프레임 대기
+                        end else begin
+                            byte_cnt <= byte_cnt + 1;
+                            state    <= S_WAIT_ACK; // 다음 바이트 대기
+                        end
                     end
                 end
                 
-                S_READ_NEXT: begin
-                    wait_cnt <= wait_cnt + 1;
-                
-                    if (wait_cnt >= 4) begin
-                        byte_cnt <= byte_cnt + 1;
-                        
-                        if (byte_cnt >= FRAME_BYTES - 1) begin
-                            // 프레임 완료!
-                            oe <= 1'b1;      // FIFO 출력 비활성화
-                            valid <= 1'b0;
-                            state <= S_IDLE;
-                        end else begin
-                            // 다음 바이트
-                            d_out <= d_in_sync2;
-                            valid <= 1'b1;
-                            state <= S_DATA;
-                        end
-                    end 
-                end
+                default: state <= S_IDLE;
             endcase
         end
     end
@@ -267,7 +418,7 @@ module ov7670_capture (
                     yuv_phase  <= PHASE_Y0;  // Reset phase
                     
                     if (cam_ready && vsync_rise) begin
-                        wrst_cnt <= 1000; // long reset time
+                        wrst_cnt <= 2000; // long reset time
                         state <= S_WRST;
                     end
                 end
@@ -278,6 +429,7 @@ module ov7670_capture (
                 S_WRST: begin
                     wrst <= 1'b0;  // Assert reset
                     wr   <= 1'b1;
+                    
                     if (wrst_cnt > 0) begin
                         wrst_cnt <= wrst_cnt - 1;
                     end else begin
@@ -291,34 +443,23 @@ module ov7670_capture (
                 // ==========================================
                 S_FRAME: begin
                     wrst <= 1'b1;
-                    wr   <= 1'b0;  // ← 항상 쓰기 활성화!
-                    
+                    // 다음 프레임 시작 감지
                     if (vsync_rise) begin
-                        wr <= 1'b1;
+                        wr <= 1'b1;  // WE = LOW
                         frame_done <= 1'b1;
                         state <= S_IDLE;
                     end
+                    // HREF HIGH = 유효 데이터 라인
+                    else if (href_d2) begin
+                        wr <= 1'b0;  // ← WE = HIGH (쓰기!)
+                        byte_count <= byte_count + 1;
+                        yuv_phase <= yuv_phase + 1'b1;  // 자동 롤오버
+                    end
+                    // HREF LOW = 블랭킹 기간
+                    else begin
+                        wr <= 1'b1;  // ← WE = LOW (쓰기 안 함!)
+                    end
                 end
-//                S_FRAME: begin
-//                    wrst <= 1'b1;  // Reset 비활성
-                    
-//                    // 다음 VSYNC = 프레임 종료
-//                    if (vsync_rise) begin
-//                        wr         <= 1'b1;  // WE = LOW
-//                        frame_done <= 1'b1;
-//                        state      <= S_IDLE;
-//                    end
-//                    // HREF HIGH = 유효 데이터 라인
-//                    else if (href_d2) begin
-//                        wr <= 1'b0;  // ← NAND 통과 후 WE = HIGH!
-//                        byte_count <= byte_count + 1;
-//                        yuv_phase  <= yuv_phase + 1'b1;
-//                    end
-//                    // HREF LOW = 수평 블랭킹
-//                    else begin
-//                        wr <= 1'b1;  // WE = LOW
-//                    end
-//                end
                 default: state <= S_IDLE;
             endcase
         end
@@ -349,7 +490,7 @@ module ov7670_sccb_ctrl (
     // --------------------------------------------------
     // Register table (QVGA + YUV422)
     // --------------------------------------------------
-    localparam ROM_SIZE = 52;  // 충분한 크기
+    localparam ROM_SIZE = 53;  // 충분한 크기
     reg [15:0] reg_rom [0:ROM_SIZE-1];
     
     initial begin
@@ -411,7 +552,8 @@ module ov7670_sccb_ctrl (
         reg_rom[48] = 16'h8F00;  // Reserved
         reg_rom[49] = 16'h9000;  // Reserved
         reg_rom[50] = 16'h9100;  // Reserved
-        reg_rom[51] = 16'hFFFF;  // End marker
+        reg_rom[51] = 16'h7080;  // Color bar
+        reg_rom[52] = 16'hFFFF;  // End marker
     end
     
     // --------------------------------------------------
